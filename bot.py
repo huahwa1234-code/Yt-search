@@ -23,6 +23,7 @@ import os
 import re
 import math
 import logging
+import asyncio  # <--- Added missing asyncio import for Python 3.14 fix
 from datetime import datetime, timezone
 
 import requests
@@ -320,6 +321,14 @@ def main() -> None:
             "(environment variables के रूप में, या bot.py में सीधे भरें)."
         )
 
+    # -----------------------------------------------------------------------
+    # FIX FOR PYTHON 3.14+ (Render Deployment Runtime Error)
+    # -----------------------------------------------------------------------
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("best", best))
@@ -330,3 +339,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
