@@ -1,35 +1,36 @@
 """
 Best Lecture Finder — Telegram Bot
 -----------------------------------
-/best <topic>  ->  Searches YouTube for the topic, pulls 20-50 candidate
-videos, scores them on relevance + views + likes + freshness + duration +
-channel quality, and returns the top 1-3 matches.
-
-Setup:
-  1. pip install -r requirements.txt
-  2. Set two environment variables (or edit the constants below):
-       TELEGRAM_BOT_TOKEN   - from @BotFather
-       YOUTUBE_API_KEY      - from Google Cloud Console (YouTube Data API v3)
-  3. python bot.py
-
-Notes:
-  - Free YouTube Data API quota is 10,000 units/day.
-    One /best call costs roughly: 100 (search) + ~1 (videos.list, batched)
-    + ~1 (channels.list, batched) = ~102 units. That's about 95 searches/day
-    on the free quota. Adjust MAX_RESULTS below if you need to conserve it.
 """
 
 import os
 import re
 import math
 import logging
-import asyncio  # <--- Added missing asyncio import for Python 3.14 fix
+import asyncio
 from datetime import datetime, timezone
 
 import requests
 from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, ContextTypes
+
+# --- Render PORT Binding Fix ---
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+class DummyHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b"Bot is active and running on Render!")
+
+def run_dummy_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(('0.0.0.0', port), DummyHandler)
+    server.serve_forever()
+# -------------------------------
 
 # ---------------------------------------------------------------------------
 # Config
@@ -38,9 +39,9 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "PUT_YOUR_TELEGRAM_TOKEN_HERE")
 YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY", "PUT_YOUR_YOUTUBE_API_KEY_HERE")
 
-MAX_RESULTS = 40          # how many candidate videos to pull (20-50 recommended)
-TOP_N = 3                 # how many best videos to return
-IDEAL_MIN_MINUTES = 8      # duration sweet spot (lectures)
+MAX_RESULTS = 40          
+TOP_N = 3                 
+IDEAL_MIN_MINUTES = 8      
 IDEAL_MAX_MINUTES = 45
 YOUTUBE_SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
 YOUTUBE_VIDEOS_URL = "https://www.googleapis.com/youtube/v3/videos"
@@ -58,7 +59,6 @@ logger = logging.getLogger("best-lecture-bot")
 # ---------------------------------------------------------------------------
 
 def search_videos(query: str, max_results: int = MAX_RESULTS) -> list[str]:
-    """Return a list of video IDs for the given query, most relevant first."""
     video_ids = []
     page_token = None
     while len(video_ids) < max_results:
@@ -87,7 +87,6 @@ def search_videos(query: str, max_results: int = MAX_RESULTS) -> list[str]:
 
 
 def fetch_video_details(video_ids: list[str]) -> list[dict]:
-    """Batch-fetch stats/snippet/contentDetails for up to 50 IDs at a time."""
     details = []
     for i in range(0, len(video_ids), 50):
         chunk = video_ids[i:i + 50]
@@ -103,7 +102,6 @@ def fetch_video_details(video_ids: list[str]) -> list[dict]:
 
 
 def fetch_channel_subscribers(channel_ids: list[str]) -> dict[str, int]:
-    """Return {channel_id: subscriber_count} for up to 50 channels at a time."""
     subs = {}
     unique_ids = list(dict.fromkeys(channel_ids))
     for i in range(0, len(unique_ids), 50):
@@ -129,7 +127,6 @@ def fetch_channel_subscribers(channel_ids: list[str]) -> dict[str, int]:
 # ---------------------------------------------------------------------------
 
 def parse_iso8601_duration(duration: str) -> int:
-    """Convert ISO 8601 duration (e.g. PT15M33S) to seconds."""
     match = re.match(
         r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", duration or ""
     )
@@ -140,7 +137,6 @@ def parse_iso8601_duration(duration: str) -> int:
 
 
 def relevance_score(query: str, title: str, description: str) -> float:
-    """Very light keyword-overlap relevance score (0-1)."""
     q_words = set(re.findall(r"\w+", query.lower()))
     if not q_words:
         return 0.0
@@ -151,19 +147,16 @@ def relevance_score(query: str, title: str, description: str) -> float:
 
 
 def duration_score(seconds: int) -> float:
-    """1.0 inside the ideal lecture-length window, decaying outside it."""
     minutes = seconds / 60
     if IDEAL_MIN_MINUTES <= minutes <= IDEAL_MAX_MINUTES:
         return 1.0
     if minutes < IDEAL_MIN_MINUTES:
         return max(0.0, minutes / IDEAL_MIN_MINUTES)
-    # longer than ideal: gentle decay, floor at 0.3
     overflow = minutes - IDEAL_MAX_MINUTES
     return max(0.3, 1.0 - overflow / 120)
 
 
 def freshness_score(published_at: str) -> float:
-    """Newer videos score higher; decays over ~5 years."""
     try:
         published = datetime.fromisoformat(published_at.replace("Z", "+00:00"))
     except ValueError:
@@ -173,7 +166,6 @@ def freshness_score(published_at: str) -> float:
 
 
 def log_scale(value: int, cap: int) -> float:
-    """0-1 normalized log scale, capped at `cap` for the top score."""
     if value <= 0:
         return 0.0
     return min(1.0, math.log10(value + 1) / math.log10(cap + 1))
@@ -191,7 +183,7 @@ def score_video(query: str, item: dict, subscriber_count: int) -> dict:
     rel = relevance_score(query, snippet.get("title", ""), snippet.get("description", ""))
     views_s = log_scale(views, cap=5_000_000)
     like_ratio = (likes / views) if views > 0 else 0
-    likes_s = min(1.0, like_ratio * 40)  # ~2.5% like ratio maxes this out
+    likes_s = min(1.0, like_ratio * 40)
     fresh_s = freshness_score(snippet.get("publishedAt", ""))
     dur_s = duration_score(duration_sec)
     channel_s = log_scale(subscriber_count, cap=2_000_000)
@@ -321,9 +313,9 @@ def main() -> None:
             "(environment variables के रूप में, या bot.py में सीधे भरें)."
         )
 
-    # -----------------------------------------------------------------------
-    # FIX FOR PYTHON 3.14+ (Render Deployment Runtime Error)
-    # -----------------------------------------------------------------------
+    # Start the dummy web server in a background thread to satisfy Render's port requirement
+    threading.Thread(target=run_dummy_server, daemon=True).start()
+
     try:
         asyncio.get_event_loop()
     except RuntimeError:
@@ -339,4 +331,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
